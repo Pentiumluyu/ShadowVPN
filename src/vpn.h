@@ -57,7 +57,7 @@ typedef struct {
   shadowvpn_args_t *args;
 } vpn_ctx_t;
 
-uint32_t xorshift32(uint32_t *a);
+uint16_t xorshift32(uint32_t *a);
 int vpn_raw_alloc(int is_server, const char *host, int port,
                   struct sockaddr *addr, socklen_t* addrlen);
 

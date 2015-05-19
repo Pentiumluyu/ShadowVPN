@@ -55,7 +55,7 @@
 #endif
 
 //for raw packet
-#include <netinet/tcp.h>
+#include <netinet/udp.h>
 #include <netinet/ip6.h>
 #include <netinet/ip.h>
 //bpf filter
@@ -102,13 +102,17 @@
 
 int is_ipv6;
 
-uint32_t xorshift32(uint32_t *a) {
+uint16_t xorshift32(uint32_t *a) {
   uint32_t state = *a;
-  state ^= (state << 13);
-  state ^= (state >> 17);
-  state ^= (state <<  5);
+  uint16_t b;
+  do {
+    state ^= (state << 13);
+    state ^= (state >> 17);
+    state ^= (state <<  5);
+    b = state & 0xffff;
+  }while(b < 1024 || b > 30000);
   *a = state;
-  return state;
+  return b;
 }
 
 #ifdef TARGET_LINUX
@@ -296,8 +300,8 @@ int vpn_raw_alloc(int is_server, const char *host, int port,
   int sock, r;
 
   memset(&hints, 0, sizeof(hints));
-  hints.ai_socktype = SOCK_STREAM;
-  hints.ai_protocol = IPPROTO_TCP;
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_protocol = IPPROTO_UDP;
   if (0 != (r = getaddrinfo(host, NULL, &hints, &res))) {
     errf("getaddrinfo: %s", gai_strerror(r));
     return -1;
@@ -318,7 +322,7 @@ int vpn_raw_alloc(int is_server, const char *host, int port,
   memcpy(addr, res->ai_addr, res->ai_addrlen);
   *addrlen = res->ai_addrlen;
 
-  if (-1 == (sock = socket(res->ai_family, SOCK_RAW, IPPROTO_TCP))) {
+  if (-1 == (sock = socket(res->ai_family, SOCK_RAW, IPPROTO_UDP))) {
     err("socket");
     errf("can not create RAW socket");
     freeaddrinfo(res);
@@ -548,7 +552,7 @@ int vpn_run(vpn_ctx_t *ctx) {
 
   unsigned char *tun_buf = malloc(mtu + SHADOWVPN_ZERO_BYTES);
   unsigned char *tcp_buf = malloc(4096);
-  struct tcphdr *tcphdr = (struct tcphdr*)tcp_buf;
+  struct udphdr *udphdr = (struct udphdr*)tcp_buf;
 
   bzero(tun_buf, SHADOWVPN_ZERO_BYTES);
   bzero(tcp_buf, SHADOWVPN_ZERO_BYTES);
@@ -602,19 +606,16 @@ int vpn_run(vpn_ctx_t *ctx) {
           break;
         }
       }
-      crypto_encrypt(tcp_buf + 12, tun_buf, r);
+      crypto_encrypt(tcp_buf, tun_buf, r);
       if (is_server) {
-        tcphdr->source = s_port;
-        tcphdr->dest = c_port;
-        tcphdr->ack = 1; //avoid report syn flood
+        udphdr->source = s_port;
+        udphdr->dest = c_port;
       } else {
-        tcphdr->dest = s_port;
-        tcphdr->source = (uint16_t) xorshift32(&rand);
-        tcphdr->syn = 1; //must be a syn packet
+        udphdr->dest = s_port;
+        udphdr->source = xorshift32(&rand);
       }
-      tcphdr->seq = rand;
-      tcphdr->doff = 5;
-      r = sendto(sock, tcp_buf, SHADOWVPN_OVERHEAD_LEN + r + 20, 0,
+      udphdr->len = htons(r + 8);
+      r = sendto(sock, tcp_buf, SHADOWVPN_OVERHEAD_LEN + r + 8, 0,
                  remote_addrp, remote_addrlen);
       if (r == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -651,13 +652,13 @@ int vpn_run(vpn_ctx_t *ctx) {
         continue;
 
       if (!isv6) {
-        decrypt = crypto_decrypt(tun_buf, tcp_buf + 32,
-                              r - SHADOWVPN_OVERHEAD_LEN - 40);
-        r = r - SHADOWVPN_OVERHEAD_LEN - 40;
+        decrypt = crypto_decrypt(tun_buf, tcp_buf + 20,
+                              r - SHADOWVPN_OVERHEAD_LEN - 28);
+        r = r - SHADOWVPN_OVERHEAD_LEN - 28;
       } else {
-        decrypt = crypto_decrypt(tun_buf, tcp_buf + 52,
-                              r - SHADOWVPN_OVERHEAD_LEN - 60);
-        r = r - SHADOWVPN_OVERHEAD_LEN - 60;
+        decrypt = crypto_decrypt(tun_buf, tcp_buf + 40,
+                              r - SHADOWVPN_OVERHEAD_LEN - 48);
+        r = r - SHADOWVPN_OVERHEAD_LEN - 48;
       }
 
       if (-1 == decrypt) {
@@ -669,13 +670,13 @@ int vpn_run(vpn_ctx_t *ctx) {
             struct sockaddr_in *temp = (struct sockaddr_in *)remote_addrp;
             //temp->sin_family = AF_INET; //enable this after enabling dual stack
             temp->sin_addr.s_addr = ((struct iphdr *)(tcp_buf))->saddr;
-            c_port = ((struct tcphdr *)(tcp_buf + 20))->source;
+            c_port = ((struct udphdr *)(tcp_buf + 20))->source;
             //remote_addrlen = sizeof(struct sockaddr_in);
           } else {
             struct sockaddr_in6 *temp = (struct sockaddr_in6 *)remote_addrp;
             //temp->sin6_family = AF_INET6;
             memcpy(temp->sin6_addr.s6_addr, ((struct ip6_hdr *)(tcp_buf))->ip6_src.s6_addr, 16);
-            c_port = ((struct tcphdr *)(tcp_buf + 40))->source;
+            c_port = ((struct udphdr *)(tcp_buf + 40))->source;
             //remote_addrlen = sizeof(struct sockaddr_in6);
           }
         }
