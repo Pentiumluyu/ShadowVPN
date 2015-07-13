@@ -293,7 +293,7 @@ int vpn_raw_alloc(int is_server, const char *host, int port,
                   struct sockaddr *addr, socklen_t* addrlen) {
   struct addrinfo hints;
   struct addrinfo *res;
-  int sock, r, filter_len;
+  int sock, r;
   struct sock_fprog bpf;
 
   memset(&hints, 0, sizeof(hints));
